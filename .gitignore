@@ -1,0 +1,6 @@
+.DS_Store
+.build/
+.swiftpm/
+EQMenuBar.app/
+*.log
+web/bookmarklet.txt
