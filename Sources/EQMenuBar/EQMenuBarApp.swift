@@ -7,19 +7,59 @@ import SwiftUI
 final class EQController {
     static let bandLabels = ["31", "62", "125", "250", "500", "1k", "2k", "4k", "8k", "16k"]
 
+    private static let defaults = UserDefaults.standard
+    private static let gainsKey = "eq.gains"
+    private static let autoHeadroomKey = "eq.autoHeadroom"
+    private static let onKey = "eq.on"
+    private static let presetsKey = "eq.presets"
+    private static let selectedPresetKey = "eq.selectedPreset"
+
     var gains: [Double] = Array(repeating: 0, count: 10) {
-        didSet { engine.setGains(gains, autoHeadroom: autoHeadroom) }
+        didSet {
+            engine.setGains(gains, autoHeadroom: autoHeadroom)
+            Self.defaults.set(gains, forKey: Self.gainsKey)
+        }
     }
     /// Off by default: turning the whole signal down by the biggest boost made music too quiet.
     var autoHeadroom = false {
-        didSet { engine.setGains(gains, autoHeadroom: autoHeadroom) }
+        didSet {
+            engine.setGains(gains, autoHeadroom: autoHeadroom)
+            Self.defaults.set(autoHeadroom, forKey: Self.autoHeadroomKey)
+        }
     }
     private(set) var isOn = false
     var errorMessage: String?
 
+    /// Named presets, each a set of ten band gains. The current gains, headroom and on/off
+    /// state are also saved on every change and restored at launch.
+    private(set) var presets: [String: [Double]] = [:]
+    /// Name of the loaded preset, or "" when none is. Stays selected while the faders are
+    /// edited so Save (with an empty name) and Delete still have a target.
+    private(set) var selectedPreset = ""
+    var newPresetName = ""
+
+    /// The faders no longer match the selected preset.
+    var isPresetModified: Bool {
+        guard let saved = presets[selectedPreset] else { return false }
+        return saved != gains
+    }
+
+    var presetNames: [String] { presets.keys.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending } }
+
     private let engine = SystemAudioEQ()
 
     init() {
+        let d = Self.defaults
+        if let saved = d.array(forKey: Self.gainsKey) as? [Double], saved.count == 10 {
+            gains = saved.map { min(max($0, -12), 12) }
+        }
+        autoHeadroom = d.bool(forKey: Self.autoHeadroomKey)
+        presets = (d.dictionary(forKey: Self.presetsKey) as? [String: [Double]] ?? [:])
+            .filter { $0.value.count == 10 }
+        selectedPreset = d.string(forKey: Self.selectedPresetKey) ?? ""
+        if presets[selectedPreset] == nil { selectedPreset = "" }
+        engine.setGains(gains, autoHeadroom: autoHeadroom)
+
         // Restart on the new device when the default output changes (e.g. AirPods connect).
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyDefaultOutputDevice,
@@ -32,9 +72,13 @@ final class EQController {
             guard let self, self.isOn else { return }
             self.setOn(true)
         }
+
+        // Come back on at launch if the EQ was on when the app last quit.
+        if d.bool(forKey: Self.onKey) { setOn(true) }
     }
 
     func setOn(_ on: Bool) {
+        Self.defaults.set(on, forKey: Self.onKey)
         guard on else {
             engine.stop()
             isOn = false
@@ -53,6 +97,42 @@ final class EQController {
     func reset() {
         gains = Array(repeating: 0, count: 10)
     }
+
+    // MARK: Presets
+
+    /// Saves the current gains under `newPresetName`, or over the selected preset when the
+    /// name field is empty. Overwrites a preset of the same name.
+    func savePreset() {
+        let name = newPresetName.trimmingCharacters(in: .whitespaces)
+        let target = name.isEmpty ? selectedPreset : name
+        guard !target.isEmpty else { return }
+        presets[target] = gains
+        newPresetName = ""
+        persistPresets()
+        select(target)
+    }
+
+    func loadPreset(_ name: String) {
+        guard let saved = presets[name] else { return }
+        gains = saved
+        select(name)
+    }
+
+    func deleteSelectedPreset() {
+        guard !selectedPreset.isEmpty else { return }
+        presets.removeValue(forKey: selectedPreset)
+        persistPresets()
+        select("")
+    }
+
+    private func select(_ name: String) {
+        selectedPreset = name
+        Self.defaults.set(name, forKey: Self.selectedPresetKey)
+    }
+
+    private func persistPresets() {
+        Self.defaults.set(presets, forKey: Self.presetsKey)
+    }
 }
 
 struct EQView: View {
@@ -64,6 +144,8 @@ struct EQView: View {
                 .toggleStyle(.switch)
 
             ResponseCurve(gains: $eq.gains)
+
+            PresetBar(eq: eq)
 
             HStack {
                 // When on, boosts are offset by turning everything down; quieter, but the
@@ -106,6 +188,43 @@ struct EQView: View {
             }
         }
         .padding()
+    }
+}
+
+/// Load, save and delete named presets. Everything else (gains, headroom, on/off) is
+/// restored automatically at launch.
+struct PresetBar: View {
+    @Bindable var eq: EQController
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Picker("Preset", selection: Binding(
+                get: { eq.selectedPreset },
+                set: { if !$0.isEmpty { eq.loadPreset($0) } }
+            )) {
+                Text(eq.presets.isEmpty ? "No presets" : "Custom").tag("")
+                ForEach(eq.presetNames, id: \.self) { name in
+                    Text(name == eq.selectedPreset && eq.isPresetModified ? "\(name) (edited)" : name).tag(name)
+                }
+            }
+            .labelsHidden()
+            .frame(maxWidth: 120)
+
+            TextField(eq.selectedPreset.isEmpty ? "Preset name" : "New name (empty = update)", text: $eq.newPresetName)
+                .textFieldStyle(.roundedBorder)
+                .onSubmit { eq.savePreset() }
+
+            Button("Save") { eq.savePreset() }
+                .disabled(eq.newPresetName.trimmingCharacters(in: .whitespaces).isEmpty && eq.selectedPreset.isEmpty)
+                .help("Save the current curve under this name, or update the selected preset")
+
+            Button(role: .destructive) { eq.deleteSelectedPreset() } label: {
+                Image(systemName: "trash")
+            }
+            .disabled(eq.selectedPreset.isEmpty)
+            .help("Delete the selected preset")
+        }
+        .controlSize(.small)
     }
 }
 

@@ -21,6 +21,12 @@ The first time you switch the EQ on, macOS asks for **System Audio Recording** p
 - `LookaheadLimiter.swift`: the peak limiter described below.
 - `build-app.sh`: builds the release binary and wraps it in an ad-hoc signed `EQMenuBar.app` with `Info.plist`. macOS only asks for System Audio Recording permission for a bundled, signed app.
 
+## Presets
+
+The curve, Auto headroom and the on/off switch are saved on every change and restored when the app launches, so it comes back exactly as you left it (switching itself on again if it was on).
+
+The row under the response curve holds named presets: type a name and press **Save** (or Return) to store the current curve, pick one from the menu to load it, and use the trash button to delete the selected one. Editing the faders after loading marks the preset "(edited)"; pressing **Save** with the name field empty writes the edits back to it. Presets live in the app's preferences (`defaults read com.example.eqmenubar eq.presets`).
+
 ## Limits
 
 - Only interleaved or planar 32-bit float tap formats are processed. Anything else makes the EQ refuse to start.
